@@ -7,7 +7,7 @@ git submodule update --init --recursive
 
 echo "==> [2/3] Installing unitree_rl_mjlab and logging deps"
 pip install -e ./unitree_rl_mjlab
-pip install wandb imageio matplotlib
+pip install "mujoco==3.5.0" "warp-lang==1.12.0" wandb imageio matplotlib
 
 echo "==> [3/3] Verifying CUDA + imports"
 python - <<'PY'
