@@ -9,26 +9,24 @@ critic_hidden_dim: [768, 768]
 
 lr: 0.0003
 weight_decay: 0.001
-gamma: 0.99 # was 0.99
-tau: 0.005 # was 0.125 for sac_vanilla
-batch_size: 8192
+gamma: 0.99
+tau: 0.005
+batch_size: 4096
 buffer_size: 1024  # per-env; total capacity = buffer_size * num_envs
-num_learning_iterations: 200000
+num_learning_iterations: 25000
 learning_starts: 10
-gradient_steps: 4
-policy_frequency: 2   # TD3-style delayed actor: actor+alpha updated every N critic updates
+gradient_steps: 8
+policy_frequency: 2
+critic_grad_clip: 1.0
 
-# entropy / alpha
-alpha_init: 0.2
+alpha_init: 0.01
 target_entropy_ratio: 0.5  # target_entropy = -act_dim * ratio
-use_autotune: false        # false = fixed alpha at alpha_init (diagnostic for alpha oscillation)
-alpha_lr: 0.00003          # slower than critic lr; only used if use_autotune=true
+use_autotune: true
+alpha_lr: 0.00003
 
-# actor log_std clamp
 log_std_min: -5.0
 log_std_max: 0.0
 
-# logging
 log_freq: 100
 ep_stats_window: 100
 ckpt_fractions: [0.25, 0.50, 0.75]
@@ -36,7 +34,6 @@ ckpt_fractions: [0.25, 0.50, 0.75]
 use_layer_norm: false
 use_mean_q: false
 
-# distributional critic (C51)
 use_distributional: false
 num_atoms: 101
 v_min: -20.0

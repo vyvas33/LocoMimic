@@ -1,86 +1,52 @@
+from dataclasses import dataclass, field
 import yaml
-from dataclasses import dataclass
+
 
 @dataclass
 class SACConfig:
-    motion_path             : str
-    device                  : str
-    seed                    : int
-    wandb_project           : str
-    actor_hidden_dim        : list[int]
-    critic_hidden_dim       : list[int]
-    lr                      : float
-    weight_decay            : float
-    gamma                   : float
-    tau                     : float
-    batch_size              : int
-    buffer_size             : int
-    num_learning_iterations : int
-    learning_starts         : int
-    gradient_steps          : int
-    alpha_init              : float
-    target_entropy_ratio    : float
-    log_std_min             : float
-    log_std_max             : float
-    log_freq                : int
-    ep_stats_window         : int
-    ckpt_fractions          : list[float]
-    use_layer_norm          : bool
-    use_mean_q              : bool
-    num_envs                : int = 4096
-    policy_frequency        : int = 1
-    use_autotune            : bool = True
-    alpha_lr                : float = 3e-5
-    critic_grad_clip        : float = 1.0
-    use_distributional      : bool = False
-    num_atoms               : int = 101
-    v_min                   : float = -20.0
-    v_max                   : float = 20.0
+    motion_path: str
+    device: str = "cuda:0"
+    seed: int = 42
+    wandb_project: str = "locomimic"
+    actor_hidden_dim: list[int] = field(default_factory=lambda: [512, 512])
+    critic_hidden_dim: list[int] = field(default_factory=lambda: [768, 768])
+    lr: float = 3e-4
+    weight_decay: float = 1e-3
+    gamma: float = 0.99
+    tau: float = 0.005
+    batch_size: int = 4096
+    buffer_size: int = 1024
+    num_learning_iterations: int = 25000
+    learning_starts: int = 10
+    gradient_steps: int = 8
+    policy_frequency: int = 1
+    alpha_init: float = 0.01
+    target_entropy_ratio: float = 0.5
+    use_autotune: bool = True
+    alpha_lr: float = 3e-5
+    critic_grad_clip: float = 1.0
+    log_std_min: float = -5.0
+    log_std_max: float = 0.0
+    log_freq: int = 100
+    ep_stats_window: int = 100
+    ckpt_fractions: list[float] = field(default_factory=lambda: [0.25, 0.50, 0.75])
+    use_layer_norm: bool = False
+    use_mean_q: bool = False
+    use_distributional: bool = False
+    num_atoms: int = 101
+    v_min: float = -20.0
+    v_max: float = 20.0
+    num_envs: int = 4096
 
-@dataclass
-class PPOConfig:
-    motion_path       : str
-    hidden_dim        : int
-    lr                : float
-    gamma             : float
-    gae_lambda        : float
-    clip_range        : float
-    n_epochs          : int
-    batch_size        : int
-    rollout_steps     : int
-    ent_coef          : float
-    vf_coef           : float
-    max_grad_norm     : float
-    total_steps       : int
-    log_freq          : int
-    save_freq         : int
-    n_envs            : int = 1
-    action_scale      : float = 0.1
-    reset_joint_noise : float = 0.0
-    reset_vel_noise   : float = 0.0
-    term_height_threshold: float = 0.4
-    term_orientation_threshold: float = 1.2
-    init_log_std      : float = -2.5
-    lr_anneal         : bool = True
-    seed              : int = 42
-    target_kl         : float = 0.01
-    vector_env_type   : str = "async"   # async | sync
-    vector_env_context: str = "spawn"   # spawn | fork | forkserver
-    torch_num_threads : int = 1
-    device            : str = 'cpu'
 
-def _auto_device(cfg):
+def _auto_device(cfg: dict) -> dict:
     import torch
-    if 'device' not in cfg:
-        cfg['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if "device" not in cfg:
+        cfg["device"] = "cuda" if torch.cuda.is_available() else "cpu"
     return cfg
 
-def load_config(path):
+
+def load_config(path: str) -> SACConfig:
     with open(path) as f:
         cfg = yaml.safe_load(f)
     return SACConfig(**_auto_device(cfg))
-
-def load_ppo_config(path):
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
-    return PPOConfig(**_auto_device(cfg))

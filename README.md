@@ -1,256 +1,131 @@
 # LocoMimic
 
+Whole-body motion imitation on the **Unitree G1** humanoid robot using retargeted LAFAN1 motions, focused on massively parallel GPU **Soft Actor-Critic (SAC)** variants on `unitree_rl_mjlab` (with PPO evaluation & comparison tooling).
+
+> **Branches**
+> - `main` — GPU-parallel `unitree_rl_mjlab` SAC (Vanilla SAC, FastSAC-style LayerNorm + Mean-Q, C51 Distributional SAC) + PPO evaluation/plotting.
+> - `legacy-sac` — Phase 1 single-env CPU MuJoCo implementation (`LocoMimicEnv` + textbook SAC/PPO).
+
+---
+
+## Project Structure
+
+```text
+.
+├── unitree_rl_mjlab/            # Submodule: GPU-vectorized mjlab env & rsl_rl PPO runner
+├── agents/
+│   ├── base.py
+│   ├── configs/
+│   │   ├── config_loader.py
+│   │   ├── sac_config.yaml          # Vanilla SAC baseline
+│   │   ├── sac_fast.yaml            # FastSAC-style (LayerNorm + mean-Q)
+│   │   └── sac_distributional.yaml  # C51 distributional double critic
+│   └── sac/
+│       ├── actor.py
+│       ├── critic.py
+│       ├── distributional_critic.py
+│       ├── replay_buffer.py
+│       └── sac_agent.py
+├── rl/
+│   └── sac_env_wrapper.py       # Asymmetric actor/critic wrapper + EmpiricalNormalization
+├── scripts/
+│   ├── train/train_sac.py       # SAC training entry point
+│   └── eval/
+│       ├── eval_sac.py          # Interactive viewer or headless SAC/random eval
+│       ├── eval_ppo.py          # Headless mjlab PPO eval (local or wandb:// ckpt)
+│       ├── make_video.py        # Side-by-side reference vs. policy mp4/gif renderer
+│       └── plot_training.py     # Shared env-step wandb training curves (PPO / SAC / FastSAC)
+├── docs/sac_design.md           # Design notes & evolution log
+├── data/                        # LAFAN1 retargeted CSVs & NPZ motions
+└── setup.sh
+```
+
+---
+
 ## Setup (Linux, CUDA)
 
 ```bash
-# 1. Install Miniconda (skip if already installed)
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
-bash /tmp/miniconda.sh -b -p $HOME/miniconda3
-source $HOME/miniconda3/etc/profile.d/conda.sh
-conda init bash && exec bash   # or restart shell
-
-# 2. Clone (vyvas-mjlab branch only, with submodules)
-git clone --branch vyvas-mjlab --single-branch --recurse-submodules \
-  https://github.com/dineshvarunshankar/LocoMimic.git
+git clone --recurse-submodules https://github.com/vyvas33/LocoMimic.git
 cd LocoMimic
 
-# 3. Create env
 conda create -n mjlab python=3.10 -y
 conda activate mjlab
 
-# 4. One-shot install
 bash setup.sh
 wandb login
 ```
 
-`setup.sh` runs: submodule init (`unitree_rl_mjlab`, `agents/tdmpc2`) → `pip install -e unitree_rl_mjlab` → TDMPC2 runtime deps (`hydra-core`, `omegaconf`, `gymnasium`, `tensordict`, `torchrl`, `termcolor`, `pandas`) → `pip install wandb` → CUDA + import sanity check.
-
-## Project Structure
-
-```
-.
-├── unitree_rl_mjlab/          # Submodule: mjlab framework
-├── agents/
-│   ├── base.py
-│   ├── configs/
-│   │   ├── sac_config.yaml
-│   │   └── config_loader.py
-│   ├── sac/
-│   │   ├── actor.py
-│   │   ├── critic.py
-│   │   ├── replay_buffer.py
-│   │   └── sac_agent.py
-│   └── tdmpc2/                # Submodule: vyvas33/tdmpc2 fork (mjlab-integration branch)
-│       └── tdmpc2/
-│           ├── envs/mjlab.py  # single-env adapter for mjlab WBT
-│           ├── config.yaml    # Hydra config (mjlab defaults)
-│           └── train.py       # TDMPC2 entry point (Hydra)
-├── rl/
-│   └── sac_env_wrapper.py     # vec-env wrapper for mjlab (also exports EmpiricalNormalization, reused by TDMPC2 adapter)
-├── scripts/train/
-│   ├── train_sac.py           # SAC entry point
-│   └── train_tdmpc2.sh        # TDMPC2 launcher (sets PYTHONPATH, runs Hydra train)
-├── data/lafan1_retargeted/    # LAFAN1 motion CSVs
-├── logs/                      # wandb + stdout logs
-└── models/                    # saved checkpoints
-```
-
-## Motion data: CSV -> NPZ
-
-mjlab's motion-tracking env consumes `.npz` motion files. LAFAN1 ships as CSV, so convert once before training.
-
+### Converting LAFAN1 CSV to NPZ
+`mjlab` consumes `.npz` motion files (50 Hz). Convert once from LAFAN1 CSV (30 Hz):
 ```bash
-
 python unitree_rl_mjlab/scripts/csv_to_npz.py \
   --robot g1 \
   --input-file data/lafan1_retargeted/g1/walk1_subject1.csv \
   --output-name walk1_subject1.npz \
   --device cuda:0
 ```
+Point `motion_path` in your chosen YAML config to the generated `.npz`.
 
-Notes:
-- `input_fps=30` (LAFAN1) and `output_fps=50` (mjlab G1 policy rate) are correct defaults — don't change unless you know why.
-- The output path is hardcoded to `./src/assets/motions/g1/`. Either pass a plain filename (as above) and update `motion_path` in the config to match, or edit `output_dir` inside `csv_to_npz.py`.
-- After conversion, set `motion_path` in `agents/configs/sac_config.yaml` to point at the generated `.npz`.
+---
 
-## Train SAC
+## Training SAC
 
-Run with `-m` from repo root so `sys.path` includes the project (needed for `rl` / `agents` imports).
+Run with `-m` from the repo root:
 
-### Smoke test (5 minutes)
 ```bash
-python -m scripts.train.train_sac \
-  --name smoketest \
-  --num_envs 256 \
-  --iter 500
-```
+# Smoke test
+python -m scripts.train.train_sac --name smoketest --num_envs 256 --iter 500
 
-Check: stdout prints log lines, wandb run opens, no NaNs in `loss/critic` or `q/max`, `buffer/size` grows, `perf/env_steps_per_sec` > 0.
-
-### Full run (vanilla SAC)
-```bash
+# Vanilla SAC
 python -m scripts.train.train_sac \
   --name sac_vanilla \
+  --config agents/configs/sac_config.yaml \
+  --num_envs 4096
+
+# FastSAC-style (LayerNorm + mean-of-Qs)
+python -m scripts.train.train_sac \
+  --name sac_fast \
+  --config agents/configs/sac_fast.yaml \
+  --num_envs 4096
+
+# C51 Distributional SAC
+python -m scripts.train.train_sac \
+  --name sac_distq \
+  --config agents/configs/sac_distributional.yaml \
   --num_envs 4096
 ```
 
-### Full run (FastSAC-style: LayerNorm + mean-of-Qs)
-```bash
-python -m scripts.train.train_sac \
-  --name sac_fast \
-  --num_envs 4096 \
-  --fast-sac
-```
+CLI overrides: `--fast-sac`, `--distributional`, `--autotune` / `--no-autotune`, `--iter N`, `--load <ckpt.pt>`.
 
-### CLI flags
-| Flag | Default | Description |
-|---|---|---|
-| `--name` | timestamp | run name (also wandb name) |
-| `--config` | `agents/configs/sac_config.yaml` | config file |
-| `--num_envs` | 4096 | parallel envs |
-| `--task` | `Unitree-G1-Tracking` | mjlab task id |
-| `--load` | None | checkpoint path to resume from |
-| `--fast-sac` | off | enables `use_layer_norm=True` + `use_mean_q=True` |
-| `--iter` | (config value) | override `num_learning_iterations` (for smoke tests) |
+Checkpoints are saved to `models/<run_name>/` alongside `<ckpt>.rms.pt` observation normalizer sidecars. See [docs/sac_design.md](docs/sac_design.md) for architecture and stability notes.
 
-### Key config values (`agents/configs/sac_config.yaml`)
-- `motion_path` — path to the `.npz` motion file (must exist before launch).
-- `device: cuda:0` — set GPU.
-- `num_learning_iterations: 25000` — each iter = one `env.step()` across all envs. Total env transitions = `num_learning_iterations × num_envs`.
-- `buffer_size: 1024` — **per-env**; total capacity = `buffer_size × num_envs`.
-- `gradient_steps: 8` — SGD updates per rollout tick.
-- `learning_starts: 10` — iterations of random-action warmup.
-- `gamma: 0.97`, `tau: 0.005`, `lr: 3e-4`, `weight_decay: 1e-3`.
-- `alpha_init: 0.001`, `target_entropy_ratio: 0.5` (→ `target_entropy = -0.5 * act_dim`).
-- `use_layer_norm`, `use_mean_q` — flipped on together by `--fast-sac`.
+---
 
-## Train TDMPC2
-
-TDMPC2 is integrated as a submodule (`agents/tdmpc2`, fork: `vyvas33/tdmpc2` branch `mjlab-integration`). The single-env adapter at `agents/tdmpc2/tdmpc2/envs/mjlab.py` wraps mjlab's `ManagerBasedRlEnv` with `num_envs=1`, exposes the actor obs view (matches PPO/SAC for fair comparison), and reuses `EmpiricalNormalization` from `rl/sac_env_wrapper.py`.
-
-Launch via the shell wrapper (handles `PYTHONPATH` so the adapter can import `rl.sac_env_wrapper` and `src.tasks`, then runs TDMPC2's native Hydra `train.py`):
-
-### Smoke test (~10 min on A10G)
-```bash
-./scripts/train/train_tdmpc2.sh \
-  steps=20000 \
-  seed_steps=2000 \
-  eval_freq=5000 \
-  enable_wandb=false
-```
-Check: training loop runs past `seed_steps`, buffer fills, `agent.update()` executes, eval episodes complete, no shape errors.
-
-### Full run
-```bash
-./scripts/train/train_tdmpc2.sh \
-  exp_name=tdmpc2_g1_tracking \
-  wandb_entity=<your-wandb-entity> \
-  steps=1_000_000
-```
-
-### Hydra overrides (pass as `key=value` after the script name)
-| Key | Default | Description |
-|---|---|---|
-| `task` | `mjlab-Unitree-G1-Tracking` | mjlab task id (prefix `mjlab-` is stripped before lookup) |
-| `motion_path` | `data/lafan1_retargeted_npz/g1/walk1_subject1.npz` | path to NPZ motion (must exist) |
-| `model_size` | `5` | TDMPC2 size preset: `1`, `5`, `19`, `48`, `317` (M params) |
-| `episodic` | `true` | required — WBT terminates early on falls/anchor drift |
-| `compile` | `false` | leave off until baseline trains; mjlab GPU sim + CUDA graphs is brittle |
-| `save_video` | `false` | mjlab render API doesn't fit TDMPC2's video logger |
-| `normalize_obs` | `true` | enable `EmpiricalNormalization` over actor obs |
-| `mjlab_max_episode_steps` | `500` | cap; some env_cfgs set `episode_length_s=1e9` |
-| `device` | `cuda` | torch device |
-| `seed_steps` | (auto = `5 × episode_length`) | random-action warmup before training begins |
-| `steps` | `10_000_000` | total env transitions |
-| `eval_freq` | `50000` | env steps between eval episodes |
-
-### Caveats
-- **Single env only.** TDMPC2's native trainer assumes one env; we run mjlab with `num_envs=1`. Wall-clock is much slower than vectorized SAC/PPO at 4096 envs — expect overnight runs. TDMPC2's win shows up in **transitions-to-reward**, not wall-clock.
-- **Logs land at** `agents/tdmpc2/tdmpc2/logs/mjlab-Unitree-G1-Tracking/<seed>/<exp_name>/` (Hydra default).
-- **Comparing to SAC/PPO:** plot `episode_reward` vs. `env_step` (transitions), not vs. wall time.
-
-### Updating the TDMPC2 submodule
-If you change anything inside `agents/tdmpc2/`, commit + push from there first, then bump the parent's pin:
-```bash
-cd agents/tdmpc2 && git add -p && git commit -m "..." && git push
-cd ../.. && git add agents/tdmpc2 && git commit -m "Bump tdmpc2 submodule" && git push
-```
-
-## Monitoring
-
-Watch these wandb panels during training:
-- `episode/avg_return` — primary success signal.
-- `q/max`, `q/mean` — divergence canary; if `q/max` grows unboundedly, the critic is overestimating → likely loss of run.
-- `loss/critic`, `loss/actor`, `loss/alpha` — should all trend downward or stabilize.
-- `policy/entropy` vs `policy/target_entropy` — alpha autotune should close the gap over time.
-- `alpha/value` — if stuck at `alpha_init` for thousands of iters, entropy pressure is not triggering; consider raising `alpha_init` or lowering `target_entropy_ratio`.
-- `grad/critic_norm`, `grad/actor_norm` — spikes = instability.
-- `perf/env_steps_per_sec` — throughput baseline; sudden drops suggest stalls.
-- `buffer/size` — should saturate at `buffer_size × num_envs`.
-
-## Checkpoints
-
-Saved under `models/<run_name>/`:
-- `ckpt_step_<N>.pt` at 25%, 50%, 75% of `num_learning_iterations` (configurable via `ckpt_fractions`).
-- `final.pt` at end of run.
-
-Resume with:
-```bash
-python -m scripts.train.train_sac --load models/<run_name>/ckpt_step_<N>.pt --name <new_name>
-```
-
-## Evaluate (macOS or Linux)
-
-After a run, pull the checkpoint locally (see rsync section below), then:
+## Evaluation, Videos & Plots
 
 ```bash
-# macOS (CPU, MuJoCo native viewer)
-python -m scripts.eval.eval_sac \
-  --ckpt models/<run_name>/final.pt \
-  --device cpu
+# Interactive viewer (use `mjpython` on macOS, `python` on Linux)
+python -m scripts.eval.eval_sac --ckpt models/<run_name>/final.pt --device cpu
 
-# Linux (GPU, headless or with viewer)
-python -m scripts.eval.eval_sac \
-  --ckpt models/<run_name>/final.pt \
-  --device cuda:0
+# Headless SAC evaluation
+python -m scripts.eval.eval_sac --ckpt models/<run_name>/final.pt --eval --eval-episodes 50
+
+# Headless PPO evaluation (mjlab rsl_rl checkpoint)
+python -m scripts.eval.eval_ppo --ckpt wandb://locomimic/locomimic/PPO_4096 --episodes 50 --num-envs 64
+
+# Side-by-side reference vs. policy video (mp4 + gif)
+python -m scripts.eval.make_video --algo sac --ckpt models/<run_name>/final.pt
+python -m scripts.eval.make_video --algo ppo --ckpt wandb://locomimic/locomimic/PPO_4096
+
+# Training curves from wandb
+python -m scripts.eval.plot_training --max-steps 5e7
+python -m scripts.eval.plot_training --mod1   # SAC vs FastSAC
 ```
 
-Flags:
-| Flag | Default | Description |
-|---|---|---|
-| `--ckpt` | (required) | checkpoint `.pt` file (also loads matching `.rms.pt` sidecar if present) |
-| `--config` | `agents/configs/sac_config.yaml` | same config used for training |
-| `--task` | `Unitree-G1-Tracking` | mjlab task id |
-| `--device` | `cpu` | `cpu` on Mac, `cuda:0` on Linux |
-| `--num_envs` | 1 | single env for visualization |
-| `--steps` | 2000 | total env steps to run |
-| `--no-render` | off | disable viewer (for scripted return evaluation) |
+*(Architecture flags like distributional Q and LayerNorm are automatically detected from the checkpoint.)*
 
-macOS notes:
-- Requires `pip install mujoco` (CPU build) — the CUDA-backed `mjlab` still runs on CPU via MuJoCo's native backend.
-- If the viewer fails to open, try `export MUJOCO_GL=glfw` (or `egl` for offscreen).
-- Expect low FPS — single-env CPU rollout is only for inspection, not training.
+---
 
-## Sync from EC2 (pull artifacts locally)
+## Acknowledgments
 
-```bash
-# Set once
-EC2_IP=<public-ip>
-KEY=~/.ssh/locomimic-key.pem
-REMOTE=/home/ubuntu/LocoMimic
-
-# Pull models, logs, wandb (non-destructive; won't delete local files)
-rsync -avz --progress -e "ssh -i $KEY" ubuntu@$EC2_IP:$REMOTE/models/ ./models/
-rsync -avz --progress -e "ssh -i $KEY" ubuntu@$EC2_IP:$REMOTE/logs/   ./logs/
-rsync -avz --progress -e "ssh -i $KEY" ubuntu@$EC2_IP:$REMOTE/wandb/  ./wandb/
-```
-
-First connection to a new IP: add `-o StrictHostKeyChecking=accept-new` to the `-e` string.
-
-## Troubleshooting
-
-- **`FileNotFoundError: .../src/assets/motions/g1/...npz`** during conversion → the `--output-name` contained subdirs; pass just a filename.
-- **`ModuleNotFoundError: tyro`** → `pip install tyro`.
-- **CUDA not available** → check `torch.cuda.is_available()`; reinstall torch with matching CUDA version.
-- **`src.tasks` import error** in `csv_to_npz.py` → the script expects a `src/` layout; add `src/` → `unitree_rl_mjlab/src/` symlink or run from the submodule root.
-- **OOM at `num_envs=4096`** → drop `num_envs` or `critic_hidden_dim`/`actor_hidden_dim`.
+This project originated as a CMU 16-831 (Introduction to Robot Learning) course project built collaboratively with Dinesh Varun Shankar in [dineshvarunshankar/16831_IRL_Project](https://github.com/dineshvarunshankar/16831_IRL_Project), building on Unitree's [unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab) and design ideas from [FastSAC / HoloSoma](https://github.com/amazon-far/holosoma).

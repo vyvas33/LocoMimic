@@ -1,6 +1,7 @@
+from dataclasses import asdict, is_dataclass
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
 
 from agents.base import BaseAlgorithm
 from agents.sac.actor import Actor
@@ -18,15 +19,17 @@ class SACAgent(BaseAlgorithm):
 
         self.use_distributional = getattr(config, 'use_distributional', False)
         if self.use_distributional:
-            self.critic = DistributionalDoubleCritic(
-                critic_obs_dim, act_dim, config.critic_hidden_dim,
-                num_atoms=config.num_atoms, v_min=config.v_min, v_max=config.v_max,
+            critic_kwargs = dict(
+                num_atoms=config.num_atoms,
+                v_min=config.v_min,
+                v_max=config.v_max,
                 use_layer_norm=config.use_layer_norm,
+            )
+            self.critic = DistributionalDoubleCritic(
+                critic_obs_dim, act_dim, config.critic_hidden_dim, **critic_kwargs
             ).to(config.device)
             self.critic_target = DistributionalDoubleCritic(
-                critic_obs_dim, act_dim, config.critic_hidden_dim,
-                num_atoms=config.num_atoms, v_min=config.v_min, v_max=config.v_max,
-                use_layer_norm=config.use_layer_norm,
+                critic_obs_dim, act_dim, config.critic_hidden_dim, **critic_kwargs
             ).to(config.device)
         else:
             self.critic = DoubleCritic(
@@ -39,23 +42,22 @@ class SACAgent(BaseAlgorithm):
             ).to(config.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        # opt
-        self.actor_optimizer  = torch.optim.AdamW(
+        use_fused = torch.device(config.device).type == 'cuda'
+        self.actor_optimizer = torch.optim.AdamW(
             self.actor.parameters(),
             lr=config.lr,
             weight_decay=config.weight_decay,
             betas=(0.9, 0.95),
-            fused=True,
+            fused=use_fused,
         )
         self.critic_optimizer = torch.optim.AdamW(
             self.critic.parameters(),
             lr=config.lr,
             weight_decay=config.weight_decay,
             betas=(0.9, 0.95),
-            fused=True,
+            fused=use_fused,
         )
 
-        # entropy temperature autotuning
         self.use_autotune = getattr(config, 'use_autotune', True)
         self.target_entropy = -act_dim * config.target_entropy_ratio
         self.log_alpha = torch.tensor(
@@ -67,19 +69,18 @@ class SACAgent(BaseAlgorithm):
         if self.use_autotune:
             alpha_lr = getattr(config, 'alpha_lr', config.lr)
             self.alpha_optimizer = torch.optim.AdamW(
-                [self.log_alpha], lr=alpha_lr, weight_decay=0.0, betas=(0.9, 0.95), fused=True
+                [self.log_alpha], lr=alpha_lr, weight_decay=0.0, betas=(0.9, 0.95), fused=use_fused
             )
         else:
             self.alpha_optimizer = None
 
-        # replay buffer
         self.buffer = ReplayBuffer(
-            max_size       = config.buffer_size,
-            num_envs       = config.num_envs,
-            actor_obs_dim  = actor_obs_dim,
-            critic_obs_dim = critic_obs_dim,
-            act_dim        = act_dim,
-            device         = config.device,
+            max_size=config.buffer_size,
+            num_envs=config.num_envs,
+            actor_obs_dim=actor_obs_dim,
+            critic_obs_dim=critic_obs_dim,
+            act_dim=act_dim,
+            device=config.device,
         )
 
         self.config = config
@@ -89,18 +90,38 @@ class SACAgent(BaseAlgorithm):
         self.act_dim = act_dim
 
         self._q_agg = self.critic.mean_Q if config.use_mean_q else self.critic.min_Q
-
         self._q_agg_target = self.critic_target.mean_Q if config.use_mean_q else self.critic_target.min_Q
 
-        # metric accumulator: per-metric running sum and count (metrics added on different
-        # update cadences — e.g. alpha/actor only every policy_frequency updates — need
-        # per-metric counts so pop_metrics reports the correct mean, not a cadence-scaled one).
         self._metric_sums: dict[str, torch.Tensor] = {}
         self._metric_counts: dict[str, int] = {}
 
-        # TD3-style delayed policy updates: actor + alpha update every N critic updates
         self.policy_frequency = getattr(config, 'policy_frequency', 1)
         self._update_counter = 0
+
+    @staticmethod
+    def infer_config_from_ckpt(ckpt_path: str, config, device: str):
+        """Sync architecture flags in config from checkpoint metadata or weights."""
+        ckpt = torch.load(ckpt_path, map_location=device)
+        saved_cfg = ckpt.get('config')
+        if isinstance(saved_cfg, dict):
+            for key in (
+                'use_distributional', 'num_atoms', 'v_min', 'v_max',
+                'use_layer_norm', 'use_mean_q', 'actor_hidden_dim', 'critic_hidden_dim',
+            ):
+                if key in saved_cfg:
+                    setattr(config, key, saved_cfg[key])
+            return config
+
+        critic_sd = ckpt.get('critic', {})
+        if 'q_support' in critic_sd:
+            q_support = critic_sd['q_support']
+            config.use_distributional = True
+            config.num_atoms = int(q_support.numel())
+            config.v_min = float(q_support.min().item())
+            config.v_max = float(q_support.max().item())
+        if any(k.endswith('net.1.weight') and v.ndim == 1 for k, v in critic_sd.items()):
+            config.use_layer_norm = True
+        return config
 
     def _accum(self, m: dict[str, torch.Tensor]) -> None:
         for k, v in m.items():
@@ -118,7 +139,7 @@ class SACAgent(BaseAlgorithm):
         self._metric_sums.clear()
         self._metric_counts.clear()
         return out
-    
+
     def select_action(self, state, deterministic=False):
         with torch.no_grad():
             if deterministic:
@@ -126,22 +147,20 @@ class SACAgent(BaseAlgorithm):
                 action = torch.tanh(mean)
             else:
                 action, _ = self.actor.sample(state)
-        
         return action
 
-    
     def collect(self, actor_obs, critic_obs, action, reward, next_actor_obs, next_critic_obs, done):
         self.buffer.add(actor_obs, critic_obs, action, reward, next_actor_obs, next_critic_obs, done)
-    
+
     def update(self):
         if len(self.buffer) < self.config.batch_size:
             return
 
         for _ in range(self.config.gradient_steps):
-            actor_obs, critic_obs, a, r, next_actor_obs, next_critic_obs, done = self.buffer.sample(self.config.batch_size)
+            batch = self.buffer.sample(self.config.batch_size)
+            actor_obs, critic_obs, a, r, next_actor_obs, next_critic_obs, done = batch
             m_c = self._update_critic(actor_obs, critic_obs, a, r, next_actor_obs, next_critic_obs, done)
 
-            # TD3-style delayed actor + alpha update
             self._update_counter += 1
             if self._update_counter % self.policy_frequency == 0:
                 m_a = self._update_actor(actor_obs, critic_obs)
@@ -154,7 +173,7 @@ class SACAgent(BaseAlgorithm):
                 self._accum(m_c)
 
             self._soft_update_targets()
-    
+
     def _update_critic(self, actor_obs, critic_obs, a, r, next_actor_obs, next_critic_obs, done):
         critic_clip = getattr(self.config, 'critic_grad_clip', 1.0)
 
@@ -163,8 +182,7 @@ class SACAgent(BaseAlgorithm):
                 a_next, log_prob_next = self.actor.sample(next_actor_obs)
                 alpha = self.log_alpha.exp()
                 bootstrap = (1.0 - done).squeeze(-1)
-                # Bake the entropy bonus into the shifted reward so each atom
-                # gets shifted by r - gamma * alpha * log_prob_next (when not done).
+                # Bake entropy term into the reward shift for C51 projection
                 shifted_reward = (
                     r.squeeze(-1) - self.config.gamma * bootstrap * alpha.squeeze() * log_prob_next.squeeze(-1)
                 )
@@ -173,11 +191,8 @@ class SACAgent(BaseAlgorithm):
                 )
 
             logits1, logits2 = self.critic(critic_obs, a)
-            log_p1 = F.log_softmax(logits1, dim=-1)
-            log_p2 = F.log_softmax(logits2, dim=-1)
-            # Cross-entropy between target distribution and predicted distribution.
-            ce1 = -(target_p1 * log_p1).sum(dim=-1).mean()
-            ce2 = -(target_p2 * log_p2).sum(dim=-1).mean()
+            ce1 = -(target_p1 * F.log_softmax(logits1, dim=-1)).sum(dim=-1).mean()
+            ce2 = -(target_p2 * F.log_softmax(logits2, dim=-1)).sum(dim=-1).mean()
             critic_loss = ce1 + ce2
 
             self.critic_optimizer.zero_grad()
@@ -190,19 +205,18 @@ class SACAgent(BaseAlgorithm):
                 q2_val = self.critic.get_value(F.softmax(logits2, dim=-1))
                 target_val = self.critic_target.get_value(target_p1)
                 return {
-                    "loss/critic":      critic_loss.detach(),
-                    "q/mean":           0.5 * (q1_val.mean() + q2_val.mean()),
-                    "q/max":            torch.maximum(q1_val.max(), q2_val.max()),
-                    "q/min":            torch.minimum(q1_val.min(), q2_val.min()),
-                    "q/target_mean":    target_val.mean(),
+                    "loss/critic": critic_loss.detach(),
+                    "q/mean": 0.5 * (q1_val.mean() + q2_val.mean()),
+                    "q/max": torch.maximum(q1_val.max(), q2_val.max()),
+                    "q/min": torch.minimum(q1_val.min(), q2_val.min()),
+                    "q/target_mean": target_val.mean(),
                     "grad/critic_norm": grad_norm.detach(),
                 }
 
-        # Scalar-critic path (unchanged).
         with torch.no_grad():
             a_next, log_prob = self.actor.sample(next_actor_obs)
             alpha = self.log_alpha.exp()
-            y = r + self.config.gamma * (self._q_agg_target(next_critic_obs, a_next) - alpha*log_prob) * (1 - done)
+            y = r + self.config.gamma * (self._q_agg_target(next_critic_obs, a_next) - alpha * log_prob) * (1 - done)
 
         q1, q2 = self.critic(critic_obs, a)
         critic_loss = F.mse_loss(q1, y) + F.mse_loss(q2, y)
@@ -214,14 +228,14 @@ class SACAgent(BaseAlgorithm):
 
         with torch.no_grad():
             return {
-                "loss/critic":    critic_loss.detach(),
-                "q/mean":         0.5 * (q1.mean() + q2.mean()),
-                "q/max":          torch.maximum(q1.max(), q2.max()),
-                "q/min":          torch.minimum(q1.min(), q2.min()),
-                "q/target_mean":  y.mean(),
+                "loss/critic": critic_loss.detach(),
+                "q/mean": 0.5 * (q1.mean() + q2.mean()),
+                "q/max": torch.maximum(q1.max(), q2.max()),
+                "q/min": torch.minimum(q1.min(), q2.min()),
+                "q/target_mean": y.mean(),
                 "grad/critic_norm": grad_norm.detach(),
             }
-    
+
     def _update_actor(self, actor_obs, critic_obs):
         a, log_prob = self.actor.sample(actor_obs)
         alpha = self.log_alpha.exp().detach()
@@ -236,13 +250,13 @@ class SACAgent(BaseAlgorithm):
         with torch.no_grad():
             _, log_std = self.actor.forward(actor_obs)
             return {
-                "loss/actor":         actor_loss.detach(),
-                "policy/entropy":     -log_prob.mean().detach(),
-                "policy/log_prob":    log_prob.mean().detach(),
-                "policy/action_std":  log_std.exp().mean().detach(),
-                "grad/actor_norm":    grad_norm.detach(),
+                "loss/actor": actor_loss.detach(),
+                "policy/entropy": -log_prob.mean().detach(),
+                "policy/log_prob": log_prob.mean().detach(),
+                "policy/action_std": log_std.exp().mean().detach(),
+                "grad/actor_norm": grad_norm.detach(),
             }
-    
+
     def _update_alpha(self, actor_obs):
         with torch.no_grad():
             _, log_prob = self.actor.sample(actor_obs)
@@ -254,11 +268,11 @@ class SACAgent(BaseAlgorithm):
 
         with torch.no_grad():
             return {
-                "loss/alpha":   alpha_loss.detach(),
-                "alpha/value":  self.log_alpha.exp().detach().squeeze(),
-                "alpha/log":    self.log_alpha.detach().squeeze(),
+                "loss/alpha": alpha_loss.detach(),
+                "alpha/value": self.log_alpha.exp().detach().squeeze(),
+                "alpha/log": self.log_alpha.detach().squeeze(),
             }
-    
+
     @torch.no_grad()
     def _soft_update_targets(self):
         tau = self.config.tau
@@ -266,15 +280,16 @@ class SACAgent(BaseAlgorithm):
         tgt = [p.data for p in self.critic_target.parameters()]
         torch._foreach_mul_(tgt, 1.0 - tau)
         torch._foreach_add_(tgt, src, alpha=tau)
-     
+
     def save(self, path):
         ckpt = {
-            'actor'          : self.actor.state_dict(),
-            'critic'         : self.critic.state_dict(),
-            'critic_target'  : self.critic_target.state_dict(),
+            'actor': self.actor.state_dict(),
+            'critic': self.critic.state_dict(),
+            'critic_target': self.critic_target.state_dict(),
             'actor_optimizer': self.actor_optimizer.state_dict(),
             'critic_optimizer': self.critic_optimizer.state_dict(),
-            'log_alpha'      : self.log_alpha,
+            'log_alpha': self.log_alpha,
+            'config': asdict(self.config) if is_dataclass(self.config) else dict(vars(self.config)),
         }
         if self.alpha_optimizer is not None:
             ckpt['alpha_optimizer'] = self.alpha_optimizer.state_dict()

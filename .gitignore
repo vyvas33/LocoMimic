@@ -1,14 +1,15 @@
-
-# submodules
-unitree_rl_mjlab
+# External repos / local references
 /mujoco_menagerie/
 /unitree_mujoco/
+/holosoma/
 
-# Experiment artifacts
+# Experiment artifacts & checkpoints
 /wandb/
 /MUJOCO_LOG.TXT
 /logs/
 /models/
+/outputs/
+*.pt
 
 # Python
 **/__pycache__/
@@ -23,13 +24,8 @@ build/
 .env
 *.env
 
-# Mac
+# OS / IDE / Jupyter
 .DS_Store
-
-# Jupyter
 .ipynb_checkpoints/
-
-# IDE
 .vscode/
 .idea/
-docs.md
