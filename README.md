@@ -95,7 +95,7 @@ python -m scripts.train.train_sac \
   --num_envs 4096
 ```
 
-CLI overrides: `--fast-sac`, `--distributional`, `--autotune` / `--no-autotune`, `--iter N`, `--load <ckpt.pt>`.
+CLI overrides: `--fast-sac`, `--distributional`, `--autotune` / `--no-autotune`, `--alpha-init X`, `--seed S`, `--iter N`, `--load <ckpt.pt>`.
 
 Checkpoints are saved to `models/<run_name>/` alongside `<ckpt>.rms.pt` observation normalizer sidecars. See [docs/sac_design.md](docs/sac_design.md) for architecture and stability notes.
 

@@ -19,8 +19,8 @@ gradient_steps: 4
 policy_frequency: 2
 critic_grad_clip: 1.0
 
-alpha_init: 0.001
-target_entropy_ratio: 0.5
+alpha_init: 0.01
+target_entropy_ratio: 0.5  # target_entropy = -act_dim * ratio
 use_autotune: true
 alpha_lr: 0.00003
 

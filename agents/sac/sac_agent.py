@@ -201,15 +201,20 @@ class SACAgent(BaseAlgorithm):
             self.critic_optimizer.step()
 
             with torch.no_grad():
-                q1_val = self.critic.get_value(F.softmax(logits1, dim=-1))
-                q2_val = self.critic.get_value(F.softmax(logits2, dim=-1))
+                p1 = F.softmax(logits1, dim=-1)
+                p2 = F.softmax(logits2, dim=-1)
+                q1_val = self.critic.get_value(p1)
+                q2_val = self.critic.get_value(p2)
                 target_val = self.critic_target.get_value(target_p1)
                 return {
                     "loss/critic": critic_loss.detach(),
                     "q/mean": 0.5 * (q1_val.mean() + q2_val.mean()),
                     "q/max": torch.maximum(q1_val.max(), q2_val.max()),
                     "q/min": torch.minimum(q1_val.min(), q2_val.min()),
+                    "q/diff": (q1_val - q2_val).abs().mean(),
                     "q/target_mean": target_val.mean(),
+                    "q/prob_v_min": 0.5 * (p1[:, 0].mean() + p2[:, 0].mean()),
+                    "q/prob_v_max": 0.5 * (p1[:, -1].mean() + p2[:, -1].mean()),
                     "grad/critic_norm": grad_norm.detach(),
                 }
 
@@ -232,6 +237,7 @@ class SACAgent(BaseAlgorithm):
                 "q/mean": 0.5 * (q1.mean() + q2.mean()),
                 "q/max": torch.maximum(q1.max(), q2.max()),
                 "q/min": torch.minimum(q1.min(), q2.min()),
+                "q/diff": (q1 - q2).abs().mean(),
                 "q/target_mean": y.mean(),
                 "grad/critic_norm": grad_norm.detach(),
             }

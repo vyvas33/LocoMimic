@@ -20,6 +20,27 @@ from agents.sac.sac_agent import SACAgent
 from rl.sac_env_wrapper import SACVecEnvWrapper
 
 
+def _accum_extras(extras, sums: dict, counts: dict) -> None:
+    log = extras.get('log') if isinstance(extras, dict) else None
+    if not log:
+        return
+    for k, v in log.items():
+        if torch.is_tensor(v):
+            if v.numel() != 1:
+                continue
+            val = v.detach().float()
+        elif isinstance(v, (int, float)):
+            val = float(v)
+        else:
+            continue
+        if k in sums:
+            sums[k] = sums[k] + val
+            counts[k] += 1
+        else:
+            sums[k] = val.clone() if torch.is_tensor(val) else val
+            counts[k] = 1
+
+
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', type=str, default=None)
@@ -31,6 +52,8 @@ def train():
     parser.add_argument('--distributional', action='store_true')
     parser.add_argument('--autotune', dest='use_autotune', action='store_true', default=None)
     parser.add_argument('--no-autotune', dest='use_autotune', action='store_false')
+    parser.add_argument('--alpha-init', type=float, default=None)
+    parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--iter', type=int, default=None)
     args = parser.parse_args()
 
@@ -39,6 +62,8 @@ def train():
 
     if args.iter is not None:
         config.num_learning_iterations = args.iter
+    if args.seed is not None:
+        config.seed = args.seed
     if args.fast_sac:
         config.use_layer_norm = True
         config.use_mean_q = True
@@ -46,6 +71,8 @@ def train():
         config.use_distributional = True
     if args.use_autotune is not None:
         config.use_autotune = args.use_autotune
+    if args.alpha_init is not None:
+        config.alpha_init = args.alpha_init
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = args.name or f'sac_{timestamp}'
@@ -92,6 +119,10 @@ def train():
     reward_sum = torch.zeros((), device=config.device)
     reward_sqsum = torch.zeros((), device=config.device)
     reward_count = 0
+    term_sum = torch.zeros((), device=config.device)
+    timeout_sum = torch.zeros((), device=config.device)
+    extras_sums: dict = {}
+    extras_counts: dict[str, int] = {}
     last_log_time = time.time()
 
     ckpt_steps = {int(config.num_learning_iterations * f) for f in config.ckpt_fractions}
@@ -102,7 +133,8 @@ def train():
         else:
             action = agent.select_action(actor_obs)
 
-        next_actor_obs, next_critic_obs, reward, terminated, time_outs, _ = env.step(action)
+        next_actor_obs, next_critic_obs, reward, terminated, time_outs, step_extras = env.step(action)
+        _accum_extras(step_extras, extras_sums, extras_counts)
 
         # Store terminated only as done so timeouts still bootstrap
         agent.collect(actor_obs, critic_obs, action, reward, next_actor_obs, next_critic_obs, terminated)
@@ -112,6 +144,8 @@ def train():
         reward_sum += reward.sum()
         reward_sqsum += (reward * reward).sum()
         reward_count += reward.numel()
+        term_sum += terminated.sum()
+        timeout_sum += time_outs.sum()
 
         done_any = terminated | time_outs
         if done_any.any():
@@ -125,7 +159,8 @@ def train():
             episode_returns[finished] = 0.0
             episode_steps[finished] = 0.0
 
-            reset_actor, reset_critic, _ = env.reset(env_ids=finished)
+            reset_actor, reset_critic, reset_extras = env.reset(env_ids=finished)
+            _accum_extras(reset_extras, extras_sums, extras_counts)
             next_actor_obs[finished] = reset_actor[finished]
             next_critic_obs[finished] = reset_critic[finished]
 
@@ -156,6 +191,22 @@ def train():
                 reward_sum.zero_()
                 reward_sqsum.zero_()
                 reward_count = 0
+
+            n_term = term_sum.item()
+            n_timeout = timeout_sum.item()
+            n_done = n_term + n_timeout
+            if n_done > 0:
+                log_data['done/terminated_rate'] = n_term / n_done
+                log_data['done/timeout_rate'] = n_timeout / n_done
+                term_sum.zero_()
+                timeout_sum.zero_()
+
+            if extras_counts:
+                for k, total in extras_sums.items():
+                    val = total.item() if torch.is_tensor(total) else total
+                    log_data[f'mjlab/{k}'] = val / extras_counts[k]
+                extras_sums.clear()
+                extras_counts.clear()
 
             if recent_returns:
                 log_data['episode/avg_return'] = sum(recent_returns) / len(recent_returns)
