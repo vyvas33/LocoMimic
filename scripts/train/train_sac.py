@@ -226,13 +226,19 @@ def train():
 
         if step in ckpt_steps:
             path = f'{run_model_dir}/ckpt_step_{step}.pt'
+            rms_path = path.replace('.pt', '.rms.pt')
             agent.save(path)
-            torch.save(env.state_dict(), path.replace('.pt', '.rms.pt'))
+            torch.save(env.state_dict(), rms_path)
+            wandb.save(path, base_path=run_model_dir, policy='now')
+            wandb.save(rms_path, base_path=run_model_dir, policy='now')
             print(f'Checkpoint saved: {path}')
 
     final_path = f'{run_model_dir}/final.pt'
+    final_rms = final_path.replace('.pt', '.rms.pt')
     agent.save(final_path)
-    torch.save(env.state_dict(), final_path.replace('.pt', '.rms.pt'))
+    torch.save(env.state_dict(), final_rms)
+    wandb.save(final_path, base_path=run_model_dir, policy='now')
+    wandb.save(final_rms, base_path=run_model_dir, policy='now')
     print(f'Final model saved: {final_path}')
 
     env.close()
