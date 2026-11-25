@@ -55,6 +55,9 @@ def train():
     parser.add_argument('--alpha-init', type=float, default=None)
     parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--iter', type=int, default=None)
+    parser.add_argument('--sampling-mode', type=str, default='uniform', choices=['uniform', 'adaptive', 'start'])
+    parser.add_argument('--v-min', type=float, default=None)
+    parser.add_argument('--v-max', type=float, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -73,6 +76,10 @@ def train():
         config.use_autotune = args.use_autotune
     if args.alpha_init is not None:
         config.alpha_init = args.alpha_init
+    if args.v_min is not None:
+        config.v_min = args.v_min
+    if args.v_max is not None:
+        config.v_max = args.v_max
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = args.name or f'sac_{timestamp}'
@@ -81,7 +88,7 @@ def train():
     os.makedirs(run_model_dir, exist_ok=True)
     os.makedirs(run_log_dir, exist_ok=True)
 
-    wandb.init(project=config.wandb_project, name=run_name, config=config.__dict__)
+    wandb.init(project=config.wandb_project, name=run_name, config={**config.__dict__, 'sampling_mode': args.sampling_mode})
 
     configure_torch_backends()
     env_cfg = load_env_cfg(args.task)
@@ -89,7 +96,7 @@ def train():
     motion_cmd = env_cfg.commands['motion']
     assert isinstance(motion_cmd, MotionCommandCfg)
     motion_cmd.motion_file = config.motion_path
-    motion_cmd.sampling_mode = 'uniform'
+    motion_cmd.sampling_mode = args.sampling_mode
 
     env_cfg.auto_reset = False
     env_cfg.scene.num_envs = args.num_envs
