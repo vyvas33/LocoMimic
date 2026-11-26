@@ -15,6 +15,8 @@ class SACAgent(BaseAlgorithm):
         self.actor = Actor(
             actor_obs_dim, act_dim, config.actor_hidden_dim,
             log_std_min=config.log_std_min, log_std_max=config.log_std_max,
+            action_scale=getattr(config, 'action_scale', 1.0),
+            init_log_std=getattr(config, 'init_log_std', None),
         ).to(config.device)
 
         self.use_distributional = getattr(config, 'use_distributional', False)
@@ -107,11 +109,15 @@ class SACAgent(BaseAlgorithm):
             for key in (
                 'use_distributional', 'num_atoms', 'v_min', 'v_max',
                 'use_layer_norm', 'use_mean_q', 'actor_hidden_dim', 'critic_hidden_dim',
+                'log_std_min', 'log_std_max',
             ):
                 if key in saved_cfg:
                     setattr(config, key, saved_cfg[key])
+            # Default legacy checkpoints (saved before action_scale existed) to 1.0
+            config.action_scale = saved_cfg.get('action_scale', 1.0)
             return config
 
+        config.action_scale = 1.0
         critic_sd = ckpt.get('critic', {})
         if 'q_support' in critic_sd:
             q_support = critic_sd['q_support']
@@ -143,8 +149,7 @@ class SACAgent(BaseAlgorithm):
     def select_action(self, state, deterministic=False):
         with torch.no_grad():
             if deterministic:
-                mean, _ = self.actor.forward(state)
-                action = torch.tanh(mean)
+                action = self.actor.deterministic(state)
             else:
                 action, _ = self.actor.sample(state)
         return action
@@ -259,7 +264,9 @@ class SACAgent(BaseAlgorithm):
                 "loss/actor": actor_loss.detach(),
                 "policy/entropy": -log_prob.mean().detach(),
                 "policy/log_prob": log_prob.mean().detach(),
-                "policy/action_std": log_std.exp().mean().detach(),
+                "policy/action_std": (log_std.exp() * self.actor.action_scale).mean().detach(),
+                "policy/action_abs_mean": a.abs().mean().detach(),
+                "policy/action_abs_max": a.abs().max().detach(),
                 "grad/actor_norm": grad_norm.detach(),
             }
 

@@ -41,6 +41,25 @@ def _accum_extras(extras, sums: dict, counts: dict) -> None:
             counts[k] = 1
 
 
+def _resolve_action_scale(env: SACVecEnvWrapper, action_scale):
+    if action_scale != 'auto':
+        return float(action_scale) if isinstance(action_scale, str) else action_scale
+    inner = env.env
+    term = inner.action_manager.get_term('joint_pos')
+    ids = getattr(term, '_target_ids', getattr(term, '_joint_ids', slice(None)))
+    robot = inner.scene['robot']
+    limits = robot.data.soft_joint_pos_limits[0, ids]
+    default = robot.data.default_joint_pos[0, ids]
+    raw_scale = getattr(term, '_scale', 1.0)
+    if torch.is_tensor(raw_scale):
+        scale_vec = raw_scale[0] if raw_scale.ndim == 2 else raw_scale
+    else:
+        scale_vec = torch.full_like(default, float(raw_scale))
+    max_rad = torch.maximum((limits[:, 1] - default).abs(), (default - limits[:, 0]).abs())
+    per_joint = (max_rad / scale_vec.to(max_rad.device).clamp(min=1e-4)).clamp(min=1.0)
+    return [round(float(x), 4) for x in per_joint.cpu().tolist()]
+
+
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', type=str, default=None)
@@ -58,6 +77,8 @@ def train():
     parser.add_argument('--sampling-mode', type=str, default='uniform', choices=['uniform', 'adaptive', 'start'])
     parser.add_argument('--v-min', type=float, default=None)
     parser.add_argument('--v-max', type=float, default=None)
+    parser.add_argument('--action-scale', type=str, default=None, help="'auto' (joint limits) or float scalar")
+    parser.add_argument('--init-log-std', type=float, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -80,6 +101,10 @@ def train():
         config.v_min = args.v_min
     if args.v_max is not None:
         config.v_max = args.v_max
+    if args.action_scale is not None:
+        config.action_scale = args.action_scale if args.action_scale == 'auto' else float(args.action_scale)
+    if args.init_log_std is not None:
+        config.init_log_std = args.init_log_std
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_name = args.name or f'sac_{timestamp}'
@@ -87,8 +112,6 @@ def train():
     run_log_dir = f'logs/{run_name}'
     os.makedirs(run_model_dir, exist_ok=True)
     os.makedirs(run_log_dir, exist_ok=True)
-
-    wandb.init(project=config.wandb_project, name=run_name, config={**config.__dict__, 'sampling_mode': args.sampling_mode})
 
     configure_torch_backends()
     env_cfg = load_env_cfg(args.task)
@@ -103,7 +126,11 @@ def train():
     env_cfg.seed = config.seed
 
     env = SACVecEnvWrapper(ManagerBasedRlEnv(cfg=env_cfg, device=config.device))
+    config.action_scale = _resolve_action_scale(env, config.action_scale)
+    wandb.init(project=config.wandb_project, name=run_name, config={**config.__dict__, 'sampling_mode': args.sampling_mode})
     agent = SACAgent(env.actor_obs_dim, env.critic_obs_dim, env.act_dim, config)
+    s_t = agent.actor.action_scale
+    print(f'Action scale: min={s_t.min().item():.2f} mean={s_t.mean().item():.2f} max={s_t.max().item():.2f}')
 
     if args.load:
         agent.load(args.load)
