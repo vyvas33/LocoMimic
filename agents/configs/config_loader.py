@@ -25,9 +25,10 @@ class SACConfig:
     use_autotune: bool = True
     alpha_lr: float = 3e-5
     critic_grad_clip: float = 1.0
-    log_std_min: float = -7.0
+    log_std_min: float = -5.0
     log_std_max: float = 0.0
     action_scale: float | str | list[float] = 1.0
+    action_scale_max: float = 3.0
     init_log_std: float | None = None
     log_freq: int = 100
     ep_stats_window: int = 100

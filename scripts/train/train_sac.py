@@ -41,7 +41,7 @@ def _accum_extras(extras, sums: dict, counts: dict) -> None:
             counts[k] = 1
 
 
-def _resolve_action_scale(env: SACVecEnvWrapper, action_scale):
+def _resolve_action_scale(env: SACVecEnvWrapper, action_scale, max_scale: float = 3.0):
     if action_scale != 'auto':
         return float(action_scale) if isinstance(action_scale, str) else action_scale
     inner = env.env
@@ -56,7 +56,7 @@ def _resolve_action_scale(env: SACVecEnvWrapper, action_scale):
     else:
         scale_vec = torch.full_like(default, float(raw_scale))
     max_rad = torch.maximum((limits[:, 1] - default).abs(), (default - limits[:, 0]).abs())
-    per_joint = (max_rad / scale_vec.to(max_rad.device).clamp(min=1e-4)).clamp(min=1.0)
+    per_joint = (max_rad / scale_vec.to(max_rad.device).clamp(min=1e-4)).clamp(min=1.0, max=max_scale)
     return [round(float(x), 4) for x in per_joint.cpu().tolist()]
 
 
@@ -77,7 +77,8 @@ def train():
     parser.add_argument('--sampling-mode', type=str, default='uniform', choices=['uniform', 'adaptive', 'start'])
     parser.add_argument('--v-min', type=float, default=None)
     parser.add_argument('--v-max', type=float, default=None)
-    parser.add_argument('--action-scale', type=str, default=None, help="'auto' (joint limits) or float scalar")
+    parser.add_argument('--action-scale', type=str, default=None, help="'auto' (capped joint limits) or float scalar")
+    parser.add_argument('--action-scale-max', type=float, default=None)
     parser.add_argument('--init-log-std', type=float, default=None)
     args = parser.parse_args()
 
@@ -103,6 +104,8 @@ def train():
         config.v_max = args.v_max
     if args.action_scale is not None:
         config.action_scale = args.action_scale if args.action_scale == 'auto' else float(args.action_scale)
+    if args.action_scale_max is not None:
+        config.action_scale_max = args.action_scale_max
     if args.init_log_std is not None:
         config.init_log_std = args.init_log_std
 
@@ -126,10 +129,10 @@ def train():
     env_cfg.seed = config.seed
 
     env = SACVecEnvWrapper(ManagerBasedRlEnv(cfg=env_cfg, device=config.device))
-    config.action_scale = _resolve_action_scale(env, config.action_scale)
+    config.action_scale = _resolve_action_scale(env, config.action_scale, config.action_scale_max)
     wandb.init(project=config.wandb_project, name=run_name, config={**config.__dict__, 'sampling_mode': args.sampling_mode})
     agent = SACAgent(env.actor_obs_dim, env.critic_obs_dim, env.act_dim, config)
-    s_t = agent.actor.action_scale
+    s_t = agent.action_scale
     print(f'Action scale: min={s_t.min().item():.2f} mean={s_t.mean().item():.2f} max={s_t.max().item():.2f}')
 
     if args.load:
@@ -163,15 +166,17 @@ def train():
 
     for step in range(config.num_learning_iterations):
         if step < config.learning_starts:
-            action = torch.rand(args.num_envs, env.act_dim, device=config.device) * 2 - 1
+            action_norm = torch.rand(args.num_envs, env.act_dim, device=config.device) * 2 - 1
         else:
-            action = agent.select_action(actor_obs)
+            action_norm = agent.select_action(actor_obs, scale=False)
 
-        next_actor_obs, next_critic_obs, reward, terminated, time_outs, step_extras = env.step(action)
+        next_actor_obs, next_critic_obs, reward, terminated, time_outs, step_extras = env.step(
+            agent.scale_action(action_norm)
+        )
         _accum_extras(step_extras, extras_sums, extras_counts)
 
-        # Store terminated only as done so timeouts still bootstrap
-        agent.collect(actor_obs, critic_obs, action, reward, next_actor_obs, next_critic_obs, terminated)
+        # Store normalized [-1, 1] actions for critic stability; terminated only so timeouts bootstrap
+        agent.collect(actor_obs, critic_obs, action_norm, reward, next_actor_obs, next_critic_obs, terminated)
 
         episode_returns += reward
         episode_steps += 1

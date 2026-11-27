@@ -15,9 +15,16 @@ class SACAgent(BaseAlgorithm):
         self.actor = Actor(
             actor_obs_dim, act_dim, config.actor_hidden_dim,
             log_std_min=config.log_std_min, log_std_max=config.log_std_max,
-            action_scale=getattr(config, 'action_scale', 1.0),
             init_log_std=getattr(config, 'init_log_std', None),
         ).to(config.device)
+
+        raw_scale = getattr(config, 'action_scale', 1.0)
+        if isinstance(raw_scale, str):
+            raise ValueError(f"Resolve action_scale={raw_scale!r} before building SACAgent")
+        scale_t = torch.as_tensor(raw_scale, dtype=torch.float32, device=config.device)
+        if scale_t.ndim == 0:
+            scale_t = scale_t.expand(act_dim).clone()
+        self.action_scale = scale_t
 
         self.use_distributional = getattr(config, 'use_distributional', False)
         if self.use_distributional:
@@ -146,13 +153,16 @@ class SACAgent(BaseAlgorithm):
         self._metric_counts.clear()
         return out
 
-    def select_action(self, state, deterministic=False):
+    def scale_action(self, action_norm: torch.Tensor) -> torch.Tensor:
+        return action_norm * self.action_scale
+
+    def select_action(self, state, deterministic=False, scale=True):
         with torch.no_grad():
             if deterministic:
                 action = self.actor.deterministic(state)
             else:
                 action, _ = self.actor.sample(state)
-        return action
+        return self.scale_action(action) if scale else action
 
     def collect(self, actor_obs, critic_obs, action, reward, next_actor_obs, next_critic_obs, done):
         self.buffer.add(actor_obs, critic_obs, action, reward, next_actor_obs, next_critic_obs, done)
@@ -260,13 +270,14 @@ class SACAgent(BaseAlgorithm):
 
         with torch.no_grad():
             _, log_std = self.actor.forward(actor_obs)
+            env_a = self.scale_action(a)
             return {
                 "loss/actor": actor_loss.detach(),
                 "policy/entropy": -log_prob.mean().detach(),
                 "policy/log_prob": log_prob.mean().detach(),
-                "policy/action_std": (log_std.exp() * self.actor.action_scale).mean().detach(),
-                "policy/action_abs_mean": a.abs().mean().detach(),
-                "policy/action_abs_max": a.abs().max().detach(),
+                "policy/action_std": log_std.exp().mean().detach(),
+                "policy/action_abs_mean": env_a.abs().mean().detach(),
+                "policy/action_abs_max": env_a.abs().max().detach(),
                 "grad/actor_norm": grad_norm.detach(),
             }
 

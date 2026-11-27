@@ -11,7 +11,6 @@ class Actor(nn.Module):
         hidden_dim: list[int],
         log_std_min: float = -20.0,
         log_std_max: float = 0.0,
-        action_scale: float | list[float] | torch.Tensor = 1.0,
         init_log_std: float | None = None,
     ):
         super().__init__()
@@ -36,13 +35,6 @@ class Actor(nn.Module):
             nn.init.uniform_(self.log_std_head.weight, -1e-3, 1e-3)
             nn.init.constant_(self.log_std_head.bias, float(init_log_std))
 
-        if isinstance(action_scale, str):
-            raise ValueError(f"Resolve action_scale={action_scale!r} before building Actor")
-        scale_t = torch.as_tensor(action_scale, dtype=torch.float32)
-        if scale_t.ndim == 0:
-            scale_t = scale_t.expand(act_dim).clone()
-        self.register_buffer("action_scale", scale_t, persistent=False)
-
     def forward(self, state):
         x = self.net(state)
         mean = self.mean_head(x)
@@ -52,7 +44,7 @@ class Actor(nn.Module):
 
     def deterministic(self, state):
         mean, _ = self.forward(state)
-        return torch.tanh(mean) * self.action_scale
+        return torch.tanh(mean)
 
     def sample(self, state):
         mean, log_std = self.forward(state)
@@ -61,11 +53,8 @@ class Actor(nn.Module):
         dist = Normal(mean, std)
         u = dist.rsample()
 
-        y = torch.tanh(u)
-        action = y * self.action_scale
-
-        # Change-of-variables Jacobian for a = action_scale * tanh(u)
-        log_prob = dist.log_prob(u) - torch.log(self.action_scale * (1.0 - y.pow(2)) + 1e-6)
+        action = torch.tanh(u)
+        log_prob = dist.log_prob(u) - torch.log(1.0 - action.pow(2) + 1e-6)
         log_prob = log_prob.sum(dim=-1, keepdim=True)
 
         return action, log_prob
